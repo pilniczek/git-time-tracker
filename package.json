@@ -1,0 +1,30 @@
+{
+  "name": "git-time-tracker",
+  "version": "1.0.0",
+  "description": "Daily work timeline from git history across multiple repositories",
+  "main": "dist/index.js",
+  "bin": {
+    "git-time-tracker": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "typecheck": "tsc --noEmit",
+    "uninstall": "ts-node scripts/uninstall.ts"
+  },
+  "dependencies": {
+    "minimist": "1.2.8"
+  },
+  "devDependencies": {
+    "@types/jest": "29.5.12",
+    "@types/minimist": "1.2.5",
+    "@types/node": "22.0.0",
+    "jest": "29.7.0",
+    "ts-jest": "29.1.5",
+    "ts-node": "10.9.2",
+    "typescript": "5.4.5"
+  }
+}

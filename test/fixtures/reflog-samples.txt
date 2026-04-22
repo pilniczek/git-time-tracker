@@ -1,0 +1,8 @@
+abc1234def5678abc1234def5678abc1234def5678|HEAD@{2026-04-22 10:30:00 +0200}|commit: Add JWT middleware|<name>|<email>
+def5678abc1234def5678abc1234def5678abc123|HEAD@{2026-04-22 09:15:00 +0200}|checkout: moving from main to feature/auth|<name>|<email>
+aaabbbccc111222333444555666777888999000aaa|HEAD@{2026-04-22 08:55:00 +0200}|commit (amend): Fix typo in README|<name>|<email>
+bbbccc111222333444555666777888999000aaabbb|HEAD@{2026-04-22 08:00:00 +0200}|commit (initial): Initial commit|<name>|<email>
+ccc111222333444555666777888999000aaabbbccc|HEAD@{2026-04-22 11:00:00 +0200}|merge feature/login: Merge pull request #12|<name>|<email>
+ddd111222333444555666777888999000aaabbbddd|HEAD@{2026-04-22 11:30:00 +0200}|rebase -i (finish): returning to refs/heads/main|<name>|<email>
+eee111222333444555666777888999000aaabbbeee|HEAD@{2026-04-22 12:00:00 +0200}|reset: moving to HEAD~1|<name>|<email>
+fff111222333444555666777888999000aaabbbfff|HEAD@{2026-04-22 12:15:00 +0200}|unknown operation: some internal git thing|<name>|<email>
