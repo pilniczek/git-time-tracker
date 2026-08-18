@@ -27,6 +27,12 @@ export function configDirFor(name: string): string {
 
 export const configFilePath = path.join(configDirFor('git-time-tracker'), 'config.json');
 
+/**
+ * Root of the installed package — `dist/..` after a build, `src/..` under
+ * ts-node, so both resolve to the checkout that `npm link` points at.
+ */
+export const packageRoot = path.resolve(__dirname, '..');
+
 export function openBrowser(url: string): void {
   if (isWSL) {
     const r = spawnSync('wslview', [url]);

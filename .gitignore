@@ -2,3 +2,5 @@ node_modules/
 dist/
 coverage/
 *.local
+reports/
+WORK-REPORT.md

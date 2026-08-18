@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import type { DateRange } from './config';
 import { gitBin } from './platform';
 import type { RawReflogEntry } from './events';
 
@@ -9,7 +10,7 @@ const MIN_FIELDS = 5;
 
 export function readReflog(
   repoPath: string,
-  date: string,
+  range: DateRange,
   authorEmail: string,
 ): RawReflogEntry[] {
   const result = spawnSync(
@@ -43,7 +44,7 @@ export function readReflog(
     return [];
   }
 
-  return parseReflogOutput(result.stdout, repoPath, date, authorEmail);
+  return parseReflogOutput(result.stdout, repoPath, range, authorEmail);
 }
 
 interface ParsedLine {
@@ -106,35 +107,47 @@ function toEntry(parsed: ParsedLine, repoPath: string, isSeed = false): RawReflo
 }
 
 /**
+ * A reflog timestamp is "2026-04-07 14:58:32 +0200", so the first 10 chars are
+ * the local calendar day and ISO strings compare correctly as plain strings.
+ */
+function inDateRange(timestamp: string, range: DateRange): boolean {
+  const day = timestamp.slice(0, 10);
+  return day >= range.from && day <= range.to;
+}
+
+/**
  * Walks the reflog (which `git log -g` returns newest-first) and emits:
- *   - every entry whose timestamp falls within the requested date, and
+ *   - every entry whose timestamp falls within the requested date range, and
  *   - one seed entry: the most recent `checkout: moving from …` *before* the
  *     window, used by `annotateCommitBranches` to know what branch HEAD was
- *     on when the day began. Without it, commits made before any in-window
+ *     on when the window began. Without it, commits made before any in-window
  *     checkout (very common — e.g. WIP after a rebase the day before) can't
  *     be attributed to a branch and their detail column loses the suffix.
  *
  * The seed is *only* a `checkout: moving from …` line — pull/rebase/merge
  * subjects are skipped so we land on something that genuinely sets the
  * tracked branch. CHECKOUT_DETACHED is included intentionally: if the user
- * was on detached HEAD entering the day, we want to clear branch state, not
+ * was on detached HEAD entering the window, we want to clear branch state, not
  * inherit a stale one.
+ *
+ * One seed for the whole range is enough regardless of its length: days after
+ * the first inherit branch state from the in-window events preceding them.
  */
 export function parseReflogOutput(
   raw: string,
   repoPath: string,
-  date?: string,
+  range?: DateRange,
   authorEmail?: string,
 ): RawReflogEntry[] {
   const entries: RawReflogEntry[] = [];
-  let enteredWindow = !date;
+  let enteredWindow = !range;
 
   for (const line of raw.split('\n')) {
     if (!line) continue;
     const parsed = parseLine(line);
     if (!parsed) continue;
 
-    const inWindow = !date || parsed.timestamp.startsWith(date);
+    const inWindow = !range || inDateRange(parsed.timestamp, range);
 
     if (inWindow) {
       enteredWindow = true;

@@ -1,9 +1,14 @@
 import * as http from 'node:http';
-import { getTodayDate, type Config } from './config';
+import { dayRange, type Config } from './config';
 import { EVENT_LABEL, formatDetail, summarize } from './formatter';
-import { buildTimelineForDate } from './pipeline';
+import { buildTimelineForRange } from './pipeline';
 
-const HTML = /* html */ `<!DOCTYPE html>
+/**
+ * `initialDate` is interpolated into the inline script as a bare string. It only
+ * ever comes from `config.range.from`, which `resolveDateRange` has already
+ * validated as YYYY-MM-DD, so there is nothing to escape.
+ */
+const html = (initialDate: string): string => /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -64,7 +69,8 @@ const HTML = /* html */ `<!DOCTYPE html>
       events + ' event' + plural(events, '', 's') + ' across ' + repos + ' repositor' + plural(repos, 'y', 'ies');
 
     const dp = document.getElementById('dp');
-    dp.value = new Date().toISOString().slice(0,10);
+    // Seeded from the CLI: --date / --from decide which day the UI opens on.
+    dp.value = '${initialDate}';
 
     let all = [], active = new Set();
 
@@ -124,6 +130,7 @@ const HTML = /* html */ `<!DOCTYPE html>
 </body>
 </html>`;
 
+
 // Smoke-test that the inline JS summarize helper stays in sync with the
 // canonical server-side implementation. If the two ever drift, throw at server
 // creation rather than silently showing a wrong footer in the UI.
@@ -140,8 +147,9 @@ export function createServer(config: Config): http.Server {
     const url = new URL(req.url ?? '/', `http://localhost:${config.port}`);
 
     if (url.pathname === '/api/timeline') {
-      const date = url.searchParams.get('date') ?? getTodayDate();
-      const entries = buildTimelineForDate(config, date).map((e) => ({
+      // The UI browses one day at a time; a day is just a range of one.
+      const date = url.searchParams.get('date') ?? config.range.from;
+      const entries = buildTimelineForRange(config, dayRange(date)).map((e) => ({
         ...e,
         timestamp: e.timestamp.toISOString(),
         detail: formatDetail(e),
@@ -156,6 +164,6 @@ export function createServer(config: Config): http.Server {
     }
 
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(HTML);
+    res.end(html(config.range.from));
   });
 }

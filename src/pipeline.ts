@@ -1,4 +1,4 @@
-import type { Config } from './config';
+import type { Config, DateRange } from './config';
 import { parseEvents } from './events';
 import { readReflog } from './reflog';
 import {
@@ -8,9 +8,9 @@ import {
   type TimelineEntry,
 } from './timeline';
 
-export function buildTimelineForDate(config: Config, date: string): TimelineEntry[] {
+export function buildTimelineForRange(config: Config, range: DateRange): TimelineEntry[] {
   const entries = config.repos.flatMap((repoPath) => {
-    const raw = readReflog(repoPath, date, config.authorEmail);
+    const raw = readReflog(repoPath, range, config.authorEmail);
     return parseEvents(raw);
   });
   const displayNames = buildRepoDisplayNames(config.repos, config.roots);

@@ -130,9 +130,11 @@ The user runs `--discover` once at setup (via `--init`) and again whenever repos
 |---|---|---|
 | `events.ts` | Unit | Pure function — input string → typed event. Cover all regex patterns and edge cases, plus `normalizeTimestamp`, `isCommitType`, `COMMIT_TYPES`. **Highest priority.** |
 | `timeline.ts` | Unit | Ascending sort across repos; `CHECKOUT_DETACHED` clears tracked branch; WIP/non-WIP branch inheritance. |
-| `formatter.ts` | Unit | `formatDetail` per event type, WIP annotation, ANSI toggle, `summarize` pluralization, CSV/Markdown escaping. |
-| `config.ts` | Unit | Verify priority: CLI args → config file → defaults. Read/write roundtrip, missing file, malformed JSON. |
+| `formatter.ts` | Unit | `formatDetail` per event type, WIP annotation, ANSI toggle, `summarize` pluralization, CSV/Markdown escaping, `groupByDay` (empty days materialised, out-of-range entries kept), `buildDocument` shape, and a parity check asserting every document string reaches both the table and the markdown output. |
+| `config.ts` | Unit | Verify priority: CLI args → config file → defaults. Read/write roundtrip, missing file, malformed JSON. `resolveDateRange` for every accepted and rejected flag combination; `eachDay` across a month boundary and a DST change. |
 | `discovery.ts` | Integration | Temporary directory tree created in test setup; verify pruning, hidden dirs, maxDepth, dedup. |
+| `output.ts` | Unit | Registry completeness, format ↔ extension round-trip, `parseFormat` rejection + prototype-key safety, `resolveFormat` precedence, `renderTimeline` dispatch and `useColor` scope. |
+| `report.ts` | Unit + tmpdir | File naming per format, bare vs. explicit `--out` resolution, directory creation, trailing-newline normalisation, self-ignoring `reports/.gitignore`. |
 | `reflog.ts` | Fixture-based | `parseReflogOutput` called directly with content from `test/fixtures/reflog-samples.txt` — no mock needed. Asserts the returned shape does **not** leak parser intermediates. |
 | `platform.ts` | Unit | `displayPath` conversion; platform detection via inline environment checks. |
 | `server.ts` + Browser UI | E2E (Playwright) | Deferred — add after core is stable. The CLI/UI drift risk is already pinned by the `summarize` self-check at server start-up. |
@@ -156,7 +158,7 @@ graph TD
     SRV -->|"per /api/timeline request"| PIPE
 
     CFG -.->|"roots[]"| DISC
-    PIPE -.->|"repos[], date, author"| REFLOG["reflog.ts"]
+    PIPE -.->|"repos[], range, author"| REFLOG["reflog.ts"]
     PLT -.->|"gitBin"| REFLOG
     PLT -.->|"openBrowser"| SRV
 
@@ -166,12 +168,16 @@ graph TD
     EVT --> TML["timeline.ts"]
     TML --> PIPE
 
-    PIPE --> FMT["formatter.ts"]
+    IDX -->|"format + --out"| OUT["output.ts"]
+    OUT --> FMT["formatter.ts"]
+    OUT -.->|"extensionFor"| RPT["report.ts"]
+    IDX -->|"--out"| RPT
+    PIPE --> OUT
     PIPE --> API["HTTP API /api/timeline"]
     API --> UI["Browser UI"]
 ```
 
-`pipeline.ts` is a thin orchestrator that chains `readReflog → parseEvents → buildTimeline → annotateCommitBranches → applyDisplayNames`. Both the CLI path and the HTTP API call it, so the pipeline exists in exactly one place.
+`pipeline.ts` is a thin orchestrator that chains `readReflog → parseEvents → buildTimeline → annotateCommitBranches → applyDisplayNames`. It exposes exactly one entry point, `buildTimelineForRange(config, range)`. Both the CLI path and the HTTP API call it; the UI browses a single day by passing `dayRange(date)`, so there is no second single-date code path.
 
 ### 4.2 Data Flow
 
@@ -185,9 +191,9 @@ sequenceDiagram
     participant Events
     participant Timeline
 
-    User->>CLI: run (optional --date, --dir, --discover)
+    User->>CLI: run (optional --date / --from + --to, --out, --dir, --discover)
     CLI->>Config: load config file + merge CLI args
-    Config-->>CLI: roots[], repos[], date, authorEmail, ...
+    Config-->>CLI: roots[], repos[], range, authorEmail, ...
 
     alt --discover flag present
         loop each root in roots[]
@@ -235,12 +241,14 @@ Single source of truth for all parameters. Priority: CLI args → config file �
 interface Config {
   roots: string[];        // root directories for discovery
   repos: string[];        // discovered repo paths — populated by --discover, empty until then
-  date: string;           // YYYY-MM-DD, default: today
+  range: DateRange;       // inclusive { from, to } day window, default: today..today (resolveDateRange)
   authorEmail: string;    // resolved automatically from `git config user.email`
   maxDepth: number;       // default: 5
   port: number;           // for --ui mode, default: 3456
 }
 ```
+
+`localDay(date)` lives here too — the local-timezone `YYYY-MM-DD` of a moment. `getTodayDate()` is `localDay(new Date())`, and `formatter.ts` groups entries with the same function, so "which day is this" has one implementation. `rangeDayCount(range)` is `eachDay(range).length` for the same reason.
 
 Config file location:
 
@@ -289,7 +297,10 @@ Usage: git-time-tracker [options]
 
 Options:
   --dir <path>    Add a root directory (repeatable, extends config file)
-  --date <date>   Date in YYYY-MM-DD format (default: today)
+  --date <date>   Single date in YYYY-MM-DD format (default: today)
+  --from <date>   Range start (inclusive); without --to, ends today
+  --to <date>     Range end (inclusive); requires --from
+  --out [path]    Write result to a file; bare --out writes reports/<from>_<to>.<ext>
   --ui            Launch interactive UI in browser
   --discover      Scan roots[] for git repositories, write repos[] to config
   --port <n>      Port for web server (default: 3456)
@@ -301,6 +312,16 @@ Options:
 `--init` walks the user through adding root directories, writes the config file, and immediately runs `--discover` — the tool is fully operational after a single command.
 
 Without `--ui` the tool runs once, prints output, and exits. With `--ui` it starts the server, opens the browser, and waits.
+
+`main()` only sequences the modes; each one is its own function so no single body carries the whole CLI:
+
+- `runInit()` — the wizard, then falls through to discovery.
+- `runDiscovery(config)` — scan + save + exit.
+- `requireAnalysableConfig(config)` — the two guards shared by CLI and UI (`repos[]` non-empty, `user.email` set). Discovery and `--init` skip them because they never read a reflog.
+- `runUi(config)` — start the server, open the browser.
+- `runTimeline(config)` — resolve format, build, render, print or write.
+
+Bad-input handling is centralised: anything that throws `CliArgsError` (invalid `--date` / `--from` / `--to` / `--format`) is caught in the single `main().catch` handler, which prints the message and exits 1. No stack trace, and no per-call-site `try`/`catch`.
 
 ---
 
@@ -351,7 +372,7 @@ git log -g \
 | `%an` | `<name>` | Author name |
 | `%ae` | `<email>` | Author email |
 
-`--author` and `--after/--before` are intentionally not passed to git: both operate on the **commit author date**, which for CHECKOUT/MERGE/REBASE events is the date of the commit being pointed to — not when the event happened. Date filtering and author filtering are done in code after parsing, using the reflog entry's own timestamp extracted from `%gd`.
+`--author` and `--after/--before` are intentionally not passed to git: both operate on the **commit author date**, which for CHECKOUT/MERGE/REBASE events is the date of the commit being pointed to — not when the event happened. Date filtering and author filtering are done in code after parsing, using the reflog entry's own timestamp extracted from `%gd`. The window is an inclusive `DateRange` (`{ from, to }`); because `%gd` renders as `YYYY-MM-DD HH:MM:SS ±ZZZZ`, its first 10 characters are the calendar day and plain string comparison (`day >= from && day <= to`) is enough. A range needs no more than the one pre-window seed CHECKOUT a single day needs: days after the first inherit branch state from the in-window events preceding them.
 
 **Current-user guarantee.** `git-time-tracker` is strictly a personal overview; it must never show another developer's commits.
 
@@ -453,6 +474,10 @@ Used by CLI mode directly, and re-used by `server.ts` which imports `formatDetai
 Internal helpers:
 
 - `countRepos(entries)` — shared `new Set(entries.map(e => e.repoPath)).size` used by the `table` and `markdown` formatters.
+- `localDay(date)` — the calendar day an entry is displayed under, derived from the machine's local timezone so it always agrees with the rendered time (`toISOString()` would push late-evening events into the next day).
+- `groupByDay(entries, range)` — buckets entries into ascending days, materialising **every** day of the range so days with no activity are rendered explicitly. Entries whose local day falls outside the range are still emitted rather than dropped, which can happen when a repo's git offset differs from the machine's.
+- `summarizeRange(entries, range)` — `summarize` plus, for multi-day ranges only, `N active days of M`.
+- `rangeTitle(range)` — `2026-04-22` for a single day, `2026-04-01 .. 2026-04-21` for a range.
 
 Output formats:
 
@@ -474,6 +499,12 @@ Git Time Tracker — 2026-04-22
  8 events across 2 repositories
 ```
 
+`buildDocument(entries, range)` produces the `TimelineDocument` that every human-readable format renders: `title`, `columns`, `sections` (each with an optional `heading`, its `rows`, and an optional per-day `summary`), `emptyNotice`, and `total`. `formatTable` and `formatMarkdown` are pure renderers of it and compute no strings of their own, so they cannot drift in wording, ordering or sectioning — only in syntax. `dayHeading(day)` (`2026-04-20 Mon`) and `EMPTY_NOTICE` are shared for the same reason.
+
+Both `table` and `markdown` render through a single loop over `groupByDay`. Per-day headings and per-day `summarize` footers are emitted only when `groups.length > 1`, so a single date produces exactly the flat output it always did, and a range produces sections. The switch is deliberately driven by the **grouped data** rather than by `isSingleDay(range)`: if a `--date` run holds an entry from a neighbouring day (git offset ≠ machine offset), both days get labelled instead of being silently merged under the requested date.
+
+`from === to` awareness survives in exactly three label functions, all naming and no logic: `rangeTitle` (`2026-04-22` vs `2026-04-01 .. 2026-04-21`), the `active days of N` suffix in `summarizeRange`, and `reportFileName` (`2026-04-22.md`, not `2026-04-22_2026-04-22.md`).
+
 `CHECKOUT` detail shows the **target branch only** — starting new work implicitly ends the previous work at the preceding timestamp, so `fromBranch` isn't tracked at all (not in the entry, not in JSON/CSV). `CHECKOUT_DETACHED` detail is the first 7 chars of the target SHA.
 
 Commits whose message is exactly `WIP`/`wip` have the resolved branch appended in the detail column (e.g. `WIP (feature/auth)`) so multiple in-flight branches can be told apart. Branch resolution happens in `timeline.ts`; the formatter only reads `entry.branch`.
@@ -482,9 +513,42 @@ A `summarize(eventCount, repoCount)` helper produces the footer string (`N event
 
 **json** — machine-readable, ISO timestamps, for integration with other tools.
 
-**csv** — for import into spreadsheet editors (pipes in detail escaped to semicolons).
+**csv** — for import into spreadsheet editors (commas in detail escaped to semicolons). Columns: `date,time,repository,type,detail,hash`. `date` duplicates part of the ISO `time`, and that redundancy is the point: it is what makes a multi-day export pivot per day in a spreadsheet.
 
-**markdown** — GitHub-flavoured Markdown table, suitable for pasting into issues, PRs, or daily notes. Pipe characters in details are escaped (`\|`).
+**markdown** — the fixed-width CLI layout verbatim inside a fenced `text` block, with only the title lifted into a `#` heading. `formatMarkdown` calls `tableBodyLines(doc, false)` — the *same* function `formatTable` uses for everything below its title — so the two formats are one implementation and cannot drift at all; markdown adds no layout of its own.
+
+A GFM pipe table was tried first and rejected: it reflows columns to the widest cell, so a long branch name destroys the alignment, and it cannot express the `──` day rules. The fence is sized by `fenceFor(content)` — a run of backticks one longer than the longest run in the content (minimum three) — so a commit message containing ``` cannot close the block early. Cell escaping is gone with the pipe table: inside a fence everything is literal.
+
+---
+
+### `report.ts` — Report File Writer
+
+Backs `--out`. Kept out of `formatter.ts` so rendering stays pure and filesystem access lives in one place.
+
+- `reportFileName(range, format)` — `<from>_<to>.<ext>` for a range, `<day>.<ext>` for a single day. The extension comes from `output.ts` via `extensionFor(format)`; `report.ts` keeps no format table of its own.
+- `resolveReportPath(out, range, format)` — a bare `--out` (empty value) resolves into `REPORTS_DIR`; an explicit value resolves against `process.cwd()`, so absolute paths pass through untouched.
+- `writeReport(filePath, content)` — creates missing directories and normalises the trailing newline.
+
+`REPORTS_DIR` is `<packageRoot>/reports`, where `packageRoot` is `path.resolve(__dirname, '..')` in `platform.ts` — `dist/..` after a build, `src/..` under ts-node, so both land on the checkout that `npm link` points at.
+
+Two layers keep generated timelines out of git: `reports/` is listed in the repository's `.gitignore`, and the first write into `REPORTS_DIR` also drops a `reports/.gitignore` containing `*` — so the directory ignores itself even if the package is vendored into a repository whose `.gitignore` this tool does not control.
+
+`index.ts` forces `useColor = false` whenever `--out` is present; ANSI escapes in a saved file are noise. Format resolution itself lives in `output.ts`.
+
+---
+
+### `output.ts` — Format Registry
+
+The single place that knows which output formats exist. One `FORMATS` table maps each `OutputFormat` to its file extension **and** its renderer, and everything else is derived from it:
+
+- `parseFormat(value)` — validates `--format`, throwing `CliArgsError` listing the accepted values. An unknown format is an error, not a silent fall-back to `table`.
+- `extensionFor(format)` / `formatFromPath(path)` — the two directions of the same mapping. `formatFromPath` searches the table rather than duplicating it as an inverse literal, so the two can never disagree.
+- `resolveFormat(explicitFormat, out)` — the policy in one expression: `--format` wins, else stdout gets `table`, an explicit `--out <path>` follows its extension, and a bare `--out` gets `markdown`.
+- `renderTimeline(entries, range, format, useColor)` — dispatch, replacing the `switch` that previously sat in `index.ts`.
+
+Adding a format is a single entry in `FORMATS`; `isOutputFormat` uses `hasOwnProperty` so inherited `Object` keys (`toString`, `constructor`) are not mistaken for formats.
+
+`formatter.ts` stays pure rendering, `report.ts` stays filesystem, and `index.ts` no longer knows any format names.
 
 ---
 
@@ -496,6 +560,10 @@ Built-in `node:http`, zero extra dependencies. Binds to `127.0.0.1` only — the
 GET /              -> single-page HTML application (inline JS + CSS)
 GET /api/timeline  -> ?date=YYYY-MM-DD -> JSON (TimelineEntry[] with pre-computed `detail`)
 ```
+
+The UI browses one day at a time, and a day is expressed as a range of one: the handler calls `buildTimelineForRange(config, dayRange(date))`, so it shares the CLI's only pipeline entry point.
+
+Which day the UI opens on comes from the CLI: the HTML is a template function taking `config.range.from`, so `--ui --date 2026-04-21` lands on that date instead of always defaulting to today in browser JS. The value is interpolated into the inline script unescaped, which is safe because `resolveDateRange` has already validated it as `YYYY-MM-DD`. Given a multi-day range, `index.ts` prints a note naming the day it opened on and that `--to` is ignored.
 
 Each entry in the `/api/timeline` response carries two extra pre-computed string fields produced server-side: **`detail`** (from `formatDetail(entry)`) and **`label`** (from `EVENT_LABEL[type]`). The browser consumes both as-is rather than re-implementing the formatting — single source of truth, no chance of CLI/UI drift. All user-controlled strings (`repoName`, `label`, `detail`, filter chip labels) are HTML-escaped before they hit `innerHTML`.
 
@@ -521,8 +589,10 @@ git-time-tracker/
 │   ├── reflog.ts         # git log -g invocation + raw output parsing
 │   ├── events.ts         # Regex parsing of subject into NormalizedEvent
 │   ├── timeline.ts       # Sort events across all repos; annotate commit branches
-│   ├── pipeline.ts       # Orchestrates reflog→events→timeline→displayNames for a given date
-│   ├── formatter.ts      # Output formats (table / json / csv / markdown); formatDetail + summarize helpers
+│   ├── pipeline.ts       # Orchestrates reflog→events→timeline→displayNames for a date range
+│   ├── formatter.ts      # Renderers (table / json / csv / markdown); per-day grouping, formatDetail + summarize helpers
+│   ├── output.ts         # Format registry: OutputFormat union, extension ↔ format, --format validation, render dispatch
+│   ├── report.ts         # --out path resolution + write into gitignored reports/
 │   └── server.ts         # HTTP server (binds 127.0.0.1) + inline UI for --ui mode
 ├── test/
 │   ├── config.test.ts
@@ -530,7 +600,9 @@ git-time-tracker/
 │   ├── events.test.ts
 │   ├── formatter.test.ts
 │   ├── platform.test.ts
+│   ├── output.test.ts
 │   ├── reflog.test.ts
+│   ├── report.test.ts
 │   ├── timeline.test.ts
 │   └── fixtures/
 │       └── reflog-samples.txt     # Real reflog output samples for fixture-based tests
