@@ -7,10 +7,14 @@ import {
   getTodayDate,
   isValidDate,
   localDay,
+  mergeInitConfig,
+  parseDayBoundary,
+  parseWorkHours,
   rangeDayCount,
   readConfigFile,
   resolveDateRange,
   writeConfigFile,
+  WorkHoursError,
   type CliArgs,
 } from '../src/config';
 
@@ -182,5 +186,67 @@ describe('readConfigFile / writeConfigFile', () => {
     writeConfigFile(tmpFile, { roots: [] });
     const raw = fs.readFileSync(tmpFile, 'utf8');
     expect(raw.endsWith('\n')).toBe(true);
+  });
+});
+
+describe('parseWorkHours', () => {
+  it('falls back to the defaults on empty answers', () => {
+    expect(parseWorkHours('', '')).toEqual({ start: '08:00', lunch: { start: '12:00', minutes: 30 } });
+  });
+
+  it('reads a start time and a lunch as start/minutes', () => {
+    expect(parseWorkHours(' 07:30 ', '11:45/45')).toEqual({
+      start: '07:30',
+      lunch: { start: '11:45', minutes: 45 },
+    });
+  });
+
+  it.each([
+    ['start time', '7:30', ''],
+    ['start hour', '24:00', ''],
+    ['lunch without minutes', '', '12:00'],
+    ['lunch minutes', '', '12:00/0'],
+  ])('rejects an invalid %s', (_label, start, lunch) => {
+    expect(() => parseWorkHours(start, lunch)).toThrow(WorkHoursError);
+  });
+});
+
+describe('parseDayBoundary', () => {
+  it('falls back to 05:00 on an empty answer', () => {
+    expect(parseDayBoundary(' ')).toBe('05:00');
+  });
+
+  it('accepts a clock time', () => {
+    expect(parseDayBoundary('04:30')).toBe('04:30');
+  });
+
+  it('rejects an invalid time', () => {
+    expect(() => parseDayBoundary('4')).toThrow(WorkHoursError);
+  });
+});
+
+describe('mergeInitConfig', () => {
+  const hours = { start: '07:00', lunch: { start: '11:30', minutes: 45 } };
+
+  it('replaces roots and keeps the other keys', () => {
+    const existing = { roots: ['/old'], repos: ['/old/repo'], port: 4000, worklog: { default: hours } };
+    expect(mergeInitConfig(existing, ['/new'], undefined)).toEqual({ ...existing, roots: ['/new'] });
+  });
+
+  it('sets the default work hours and keeps the weekday overrides', () => {
+    const days = { fri: { start: '09:00' } };
+    const existing = { roots: [], worklog: { default: { ...hours, start: '06:00' }, days } };
+    expect(mergeInitConfig(existing, ['/a'], { default: hours, dayBoundary: '05:00' }).worklog).toEqual({
+      default: hours,
+      dayBoundary: '05:00',
+      days,
+    });
+  });
+
+  it('adds the worklog section to a config without one', () => {
+    expect(mergeInitConfig({ roots: [] }, ['/a'], { default: hours, dayBoundary: '04:00' })).toEqual({
+      roots: ['/a'],
+      worklog: { default: hours, dayBoundary: '04:00' },
+    });
   });
 });

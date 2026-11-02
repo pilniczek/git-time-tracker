@@ -6,10 +6,16 @@ import {
   CliArgsError,
   isSingleDay,
   loadConfig,
+  mergeInitConfig,
+  parseDayBoundary,
+  parseWorkHours,
+  readConfigFile,
   saveRepos,
+  WorkHoursError,
   writeConfigFile,
   type CliArgs,
   type Config,
+  type WorkHours,
 } from './config';
 import { discoverRepos } from './discovery';
 import { rangeTitle, summarizeRange } from './formatter';
@@ -75,16 +81,36 @@ async function runInit(): Promise<void> {
     console.log(`  + Added: ${displayPath(input)}`);
   }
 
-  rl.close();
-
   if (roots.length === 0) {
+    rl.close();
     console.log('\nNo directories added. Exiting.');
     process.exit(1);
   }
 
-  writeConfigFile(configFilePath, { roots });
+  const worklog = await askWorklog(ask);
+  rl.close();
+
+  writeConfigFile(configFilePath, mergeInitConfig(readConfigFile(configFilePath), roots, worklog));
   console.log(`\nConfig saved: ${configFilePath}`);
   console.log('\nRunning discovery...\n');
+}
+
+async function askWorklog(
+  ask: (q: string) => Promise<string>,
+): Promise<{ default: WorkHours; dayBoundary: string } | undefined> {
+  const wanted = (await ask('\nSet up working hours for the git-worklog skill? [y/N] ')).trim().toLowerCase();
+  if (wanted !== 'y' && wanted !== 'yes') return undefined;
+  while (true) {
+    const start = await ask('Usual start of work [08:00]: ');
+    const lunch = await ask('Usual lunch as start/minutes [12:00/30]: ');
+    const boundary = await ask('Work day ends at, night work before it counts to the previous day [05:00]: ');
+    try {
+      return { default: parseWorkHours(start, lunch), dayBoundary: parseDayBoundary(boundary) };
+    } catch (error) {
+      if (!(error instanceof WorkHoursError)) throw error;
+      console.log(`  ! ${error.message}`);
+    }
+  }
 }
 
 function fail(message: string): never {

@@ -26,7 +26,7 @@ Run the interactive wizard once:
 git-time-tracker --init
 ```
 
-It will ask you for the root directories that contain your git repositories, write a config file, and run discovery automatically. After that, the tool is ready to use.
+It will ask you for the root directories that contain your git repositories, whether you want working hours for the [`git-worklog` skill](#worklog-skill) (start of work, lunch and day boundary, Enter accepts the defaults), write a config file, and run discovery automatically. After that, the tool is ready to use.
 
 ### WSL
 
@@ -186,7 +186,12 @@ The config file is created automatically by `--init`. You can also edit it by ha
     "C:\\Users\\<user>\\Projects_win\\my-app"
   ],
   "maxDepth": 5,
-  "port": 3456
+  "port": 3456,
+  "worklog": {
+    "dayBoundary": "05:00",
+    "default": { "start": "08:00", "lunch": { "start": "12:00", "minutes": 30 } },
+    "days": { "mon": { "start": "07:00" } }
+  }
 }
 ```
 
@@ -197,6 +202,8 @@ The config file is created automatically by `--init`. You can also edit it by ha
 `maxDepth` — how many directory levels deep to look for git repositories (default: `5`).
 
 Run `git-time-tracker --discover` after adding new projects to update `repos`.
+
+`worklog` - optional working hours for the [`git-worklog` skill](#worklog-skill). The tracker itself ignores this key, and `--init` keeps an existing `worklog` section when you run it again.
 
 ## Example output
 
@@ -245,6 +252,73 @@ Commits whose message is exactly `WIP` or `wip` have the branch name appended in
 
 The branch is resolved from the preceding `CHECKOUT` event in the timeline when available, or by looking up the commit in the repo's branches as a fallback.
 
+## Worklog skill
+
+`git-worklog` is a Claude Code skill in `.claude/skills/git-worklog` that turns the timeline into calendar entries: one row per block of work on one ticket, with date, start, `SST-` ticket ID, description and duration. Ask Claude Code in this repository for a worklog, e.g. `/git-worklog 2026-10-12 - 2026-10-29`. The table lands in `reports/worklog-<from>_<to>.md`.
+
+Each description has two paragraphs: the original commit messages as a reminder for the developer, then a plain Czech summary for readers who do not develop software.
+
+```mermaid
+flowchart LR
+  T[git-time-tracker<br>--format json] --> S[sessions:<br>day plans]
+  S --> A{ASK lines?}
+  A -- yes --> U[user answers:<br>start, meeting, break, WIP]
+  U --> S
+  A -- no --> E[Claude writes<br>entries.json]
+  E --> R[render:<br>validate + split at midnight]
+  R --> M[reports/worklog-*.md]
+```
+
+### Time model
+
+- A commit closes work: the time since the previous commit belongs to its ticket. The day's first commit takes the time since the configured start, and the day ends at its last commit.
+- Checkouts, merges, rebases and squashing are not work. WIP commits count toward the next non-WIP commit on the same branch.
+- A work day runs from one `dayBoundary` to the next, so night work after midnight belongs to the evening it started.
+- Lunch is deducted from the block that spans it.
+- The skill asks when the first commit lands before the configured start, when over 2 h pass between commits (meeting or break), and when a WIP has no follow-up commit.
+- Blocks are at most 4 h. An entry crossing midnight becomes two rows, one per calendar date, marked `(část 1)` and `(část 2)`.
+
+The full rules live in [`SKILL.md`](.claude/skills/git-worklog/SKILL.md).
+
+### Working hours
+
+`--init` writes the first `worklog` section. Change it later by editing the [config file](#config-file) directly:
+
+```json
+"worklog": {
+  "dayBoundary": "05:00",
+  "default": { "start": "08:00", "lunch": { "start": "12:00", "minutes": 30 } },
+  "days": {
+    "mon": { "start": "07:00" },
+    "wed": { "lunch": { "start": "12:00", "minutes": 90 } }
+  }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `dayBoundary` | When a work day ends (`HH:MM`, default `05:00`). Commits before it count toward the previous day. |
+| `default` | Usual start of work and lunch (start and length in minutes). Optional when every working weekday is listed in `days`. |
+| `days` | Overrides per weekday (`mon`..`sun`), field by field. A weekday with no entry uses `default`. |
+
+### Commands
+
+The skill runs these through `npm run worklog --` (from the repository root); you rarely need them yourself.
+
+| Command | Purpose |
+|---|---|
+| `config --start 08:00 --lunch 12:00 --lunch-minutes 30` | Set `default` |
+| `config --day mon --start 07:00` | Set one weekday; give only the values that differ (`--start`, `--lunch`, `--lunch-minutes`) |
+| `config --day-boundary 05:00` | Set `dayBoundary` |
+| `sessions --from D [--to D]` | Print day plans and ASK lines for a range of work days |
+| `sessions ... --starts D=HH:MM,...` | Answer `ASK start` |
+| `sessions ... --meetings D=HH:MM-HH:MM,...` | Add meetings (own `n/a` row) |
+| `sessions ... --breaks D=HH:MM-HH:MM,...` | Add breaks (no row) |
+| `sessions ... --lunches D=HH:MM/N,...` | Use a different lunch on one date |
+| `render --from D [--to D] --entries file.json` | Validate entries and write the report |
+
+Dates in `--starts`, `--meetings`, `--breaks` and `--lunches` are work days, so a range after midnight goes under the evening's date.
+
 ## Uninstall
 
 Remove the global `npm link` binary created during installation:
@@ -261,8 +335,11 @@ The script runs `npm unlink -g git-time-tracker` and then prompts before deletin
 # Type-check without building
 npm run typecheck
 
-# Run tests
+# Run tests (Jest, then the worklog skill tests)
 npm test
+
+# Run only the worklog skill tests
+npm run test:worklog
 
 # Run tests with coverage
 npm run test:coverage
@@ -275,7 +352,7 @@ npm run dev -- --date 2026-04-22
 npm run dev -- --from 2026-04-01 --to 2026-04-22
 ```
 
-Tests live in `test/` and use Jest + ts-jest. Each module has a dedicated test file (`config`, `discovery`, `events`, `formatter`, `platform`, `reflog`, `report`, `timeline`); `reflog.ts` is tested via `test/fixtures/reflog-samples.txt` (real reflog output samples) without mocking `child_process`.
+Tests live in `test/` and use Jest + ts-jest. Each module has a dedicated test file (`config`, `discovery`, `events`, `formatter`, `platform`, `reflog`, `report`, `timeline`); `reflog.ts` is tested via `test/fixtures/reflog-samples.txt` (real reflog output samples) without mocking `child_process`. The worklog skill script is tested by `.claude/skills/git-worklog/scripts/worklog.test.mts` on Node's built-in test runner, and `npm run typecheck` also checks it.
 
 ## How it works
 

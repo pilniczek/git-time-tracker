@@ -10,10 +10,12 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
-    "test": "jest",
+    "test": "jest && npm run test:worklog",
+    "test:worklog": "node --test .claude/skills/git-worklog/scripts/worklog.test.mts",
     "test:coverage": "jest --coverage",
-    "typecheck": "tsc --noEmit",
-    "uninstall": "ts-node scripts/uninstall.ts"
+    "typecheck": "tsc --noEmit && tsc -p .claude/skills/git-worklog",
+    "uninstall": "ts-node scripts/uninstall.ts",
+    "worklog": "node .claude/skills/git-worklog/scripts/worklog.mts"
   },
   "dependencies": {
     "minimist": "1.2.8"

@@ -3,11 +3,25 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { configFilePath } from './platform';
 
+export interface WorkHours {
+  start: string;
+  lunch: { start: string; minutes: number };
+}
+
+export type Weekday = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+
+export interface WorklogConfig {
+  dayBoundary?: string;
+  default?: WorkHours;
+  days?: Partial<Record<Weekday, Partial<WorkHours>>>;
+}
+
 export interface ConfigFile {
   roots: string[];
   repos?: string[];
   maxDepth?: number;
   port?: number;
+  worklog?: WorklogConfig;
 }
 
 /** Inclusive day window, both bounds in YYYY-MM-DD. */
@@ -156,6 +170,43 @@ export function readConfigFile(filePath: string): ConfigFile {
   } catch {
     return { roots: [] };
   }
+}
+
+export class WorkHoursError extends Error {}
+
+export const DEFAULT_WORK_HOURS: WorkHours = { start: '08:00', lunch: { start: '12:00', minutes: 30 } };
+
+export const DEFAULT_DAY_BOUNDARY = '05:00';
+
+const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/;
+const LUNCH = /^(\d{2}:\d{2})\/(\d+)$/;
+
+function requireClock(value: string, label: string): string {
+  if (!CLOCK.test(value)) throw new WorkHoursError(`${label} must be HH:MM (got "${value}").`);
+  return value;
+}
+
+export function parseWorkHours(startAnswer: string, lunchAnswer: string): WorkHours {
+  const start = startAnswer.trim() || DEFAULT_WORK_HOURS.start;
+  const lunch = lunchAnswer.trim();
+  if (!lunch) return { start: requireClock(start, 'Start'), lunch: DEFAULT_WORK_HOURS.lunch };
+  const match = LUNCH.exec(lunch);
+  const minutes = Number(match?.[2]);
+  if (!match || minutes <= 0) throw new WorkHoursError(`Lunch must be HH:MM/minutes (got "${lunch}").`);
+  return { start: requireClock(start, 'Start'), lunch: { start: requireClock(match[1], 'Lunch'), minutes } };
+}
+
+export function parseDayBoundary(answer: string): string {
+  return requireClock(answer.trim() || DEFAULT_DAY_BOUNDARY, 'Day boundary');
+}
+
+export function mergeInitConfig(
+  existing: ConfigFile,
+  roots: string[],
+  setup: Pick<WorklogConfig, 'default' | 'dayBoundary'> | undefined,
+): ConfigFile {
+  const worklog = setup ? { ...existing.worklog, ...setup } : existing.worklog;
+  return { ...existing, roots, ...(worklog ? { worklog } : {}) };
 }
 
 export function writeConfigFile(filePath: string, data: ConfigFile): void {
